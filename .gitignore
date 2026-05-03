@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Local app data
+backend/yournoteai.db
+backend/storage/audio/*
+backend/storage/transcripts/*
+backend/storage/summaries/*
+!backend/storage/audio/.gitkeep
+!backend/storage/transcripts/.gitkeep
+!backend/storage/summaries/.gitkeep
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS/editor
+.DS_Store
+Thumbs.db
+*.tsbuildinfo
