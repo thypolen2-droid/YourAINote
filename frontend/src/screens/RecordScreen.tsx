@@ -1,8 +1,11 @@
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
   AudioModule,
+  AudioQuality,
+  IOSOutputFormat,
   RecordingPresets,
   setAudioModeAsync,
+  type RecordingOptions,
   useAudioPlayer,
   useAudioPlayerStatus,
   useAudioRecorder,
@@ -14,10 +17,39 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Screen } from './Screen';
-import { uploadNote } from '../api/notes';
+import { uploadNote, UploadedNote, waitForNoteProcessing } from '../api/notes';
 import { RootTabParamList } from '../navigation/types';
 import { useAppPreferences } from '../preferences/PreferencesContext';
 import { AppTheme } from '../theme/themes';
+
+const VOICE_RECORDING_OPTIONS: RecordingOptions = {
+  ...RecordingPresets.HIGH_QUALITY,
+  bitRate: 64000,
+  numberOfChannels: 1,
+  ios: {
+    ...RecordingPresets.HIGH_QUALITY.ios,
+    audioQuality: AudioQuality.HIGH,
+    outputFormat: IOSOutputFormat.MPEG4AAC,
+  },
+};
+
+async function configureRecordingAudio() {
+  await setAudioModeAsync({
+    allowsRecording: true,
+    interruptionMode: 'doNotMix',
+    playsInSilentMode: true,
+    shouldPlayInBackground: false,
+  });
+}
+
+async function configurePlaybackAudio() {
+  await setAudioModeAsync({
+    allowsRecording: false,
+    interruptionMode: 'doNotMix',
+    playsInSilentMode: true,
+    shouldPlayInBackground: false,
+  });
+}
 
 function formatDuration(milliseconds: number) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -60,18 +92,43 @@ function getFriendlyUploadError(rawMessage: string, t: (key: string) => string) 
   return t('upload_failed');
 }
 
+function isFailedNote(note: UploadedNote) {
+  return note.status.toLowerCase().includes('fail');
+}
+
+function isProcessingNote(note: UploadedNote) {
+  return ['uploaded', 'transcribing', 'transcribed', 'summarizing'].includes(note.status);
+}
+
+function getFriendlyProcessingMessage(note: UploadedNote, t: (key: string) => string) {
+  if (note.is_stale) {
+    return t('job_stuck_hint');
+  }
+
+  if (isFailedNote(note)) {
+    return t('processing_failed_hint');
+  }
+
+  if (isProcessingNote(note)) {
+    return t('processing_timeout');
+  }
+
+  return t('upload_failed');
+}
+
 export function RecordScreen() {
   const { t } = useTranslation();
   const navigation = useNavigation<BottomTabNavigationProp<RootTabParamList, 'Record'>>();
   const { backendUrl, language, theme } = useAppPreferences();
   const styles = createStyles(theme);
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const audioRecorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(audioRecorder, 250);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
   const [isPaused, setIsPaused] = useState(false);
   const [message, setMessage] = useState(t('no_recording_preview'));
   const [isBusy, setIsBusy] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [hasUploadFailed, setHasUploadFailed] = useState(false);
   const player = useAudioPlayer(recordingUri ? { uri: recordingUri } : null, {
     updateInterval: 250,
   });
@@ -102,11 +159,9 @@ export function RecordScreen() {
         return;
       }
 
-      await setAudioModeAsync({
-        allowsRecording: true,
-        playsInSilentMode: true,
-      });
+      await configureRecordingAudio();
       setRecordingUri(null);
+      setHasUploadFailed(false);
       setIsPaused(false);
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
@@ -136,13 +191,11 @@ export function RecordScreen() {
     try {
       await audioRecorder.stop();
       const uri = audioRecorder.uri ?? recorderState.url;
+      await configurePlaybackAudio();
       setRecordingUri(uri);
+      setHasUploadFailed(false);
       setIsPaused(false);
       setMessage(uri ? t('recording_ready') : t('recording_error'));
-      await setAudioModeAsync({
-        allowsRecording: false,
-        playsInSilentMode: true,
-      });
     } catch (error) {
       setMessage(t('recording_error'));
     } finally {
@@ -164,6 +217,7 @@ export function RecordScreen() {
       await player.seekTo(0);
     }
 
+    await configurePlaybackAudio();
     player.play();
   };
 
@@ -173,6 +227,7 @@ export function RecordScreen() {
     }
 
     setIsUploading(true);
+    setHasUploadFailed(false);
     setMessage(t('uploading'));
     player.pause();
     navigation.navigate('Processing');
@@ -184,22 +239,47 @@ export function RecordScreen() {
         language,
         uri: recordingUri,
       });
+      const processedNote = await waitForNoteProcessing({
+        backendUrl,
+        noteId: note.id,
+      });
+
+      if (processedNote.status !== 'completed') {
+        const processingMessage = getFriendlyProcessingMessage(processedNote, t);
+
+        setHasUploadFailed(true);
+        setMessage(processingMessage);
+        navigation.navigate('Record');
+        Alert.alert(
+          processedNote.is_stale ? t('job_stuck') : t('job_failed'),
+          processingMessage,
+          [
+            { text: t('try_again'), onPress: uploadRecording },
+            { text: t('cancel'), style: 'cancel' },
+          ],
+        );
+        return;
+      }
 
       setMessage(t('upload_ready'));
       navigation.navigate('Result', {
-        note,
+        note: processedNote,
         recordingUri,
       });
     } catch (error) {
       const messageText =
         error instanceof TypeError
           ? t('backend_offline')
-          : error instanceof Error
+            : error instanceof Error
             ? getFriendlyUploadError(error.message, t)
             : t('upload_failed');
+      setHasUploadFailed(true);
       setMessage(messageText);
       navigation.navigate('Record');
-      Alert.alert(t('upload_failed'), messageText);
+      Alert.alert(t('upload_failed'), messageText, [
+        { text: t('try_again'), onPress: uploadRecording },
+        { text: t('cancel'), style: 'cancel' },
+      ]);
     } finally {
       setIsUploading(false);
     }
@@ -265,6 +345,24 @@ export function RecordScreen() {
             <Text style={styles.buttonText}>{isUploading ? t('uploading') : t('upload')}</Text>
           </Pressable>
         </View>
+        {hasUploadFailed && recordingUri ? (
+          <View style={styles.retryCard}>
+            <View style={styles.retryText}>
+              <Text style={styles.retryTitle}>{t('job_failed')}</Text>
+              <Text style={styles.retrySubtitle}>{t('try_again_hint')}</Text>
+            </View>
+            <Pressable
+              disabled={hasActiveRecording || isBusy || isUploading}
+              onPress={uploadRecording}
+              style={[
+                styles.retryButton,
+                (hasActiveRecording || isBusy || isUploading) && styles.disabledButton,
+              ]}
+            >
+              <Text style={styles.retryButtonText}>{t('try_again')}</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <View style={styles.previewCard}>
           <View style={styles.previewText}>
             <Text style={styles.previewTitle}>{t('preview')}</Text>
@@ -395,6 +493,44 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     gap: 16,
     justifyContent: 'space-between',
     padding: 19,
+  },
+  retryCard: {
+    alignItems: 'center',
+    backgroundColor: theme.dangerSoft,
+    borderColor: theme.danger,
+    borderRadius: 22,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 14,
+    justifyContent: 'space-between',
+    padding: 18,
+  },
+  retryText: {
+    flex: 1,
+    gap: 4,
+  },
+  retryTitle: {
+    color: theme.danger,
+    fontSize: 17,
+    fontWeight: '900',
+  },
+  retrySubtitle: {
+    color: theme.text,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  retryButton: {
+    alignItems: 'center',
+    backgroundColor: theme.danger,
+    borderRadius: 16,
+    minWidth: 94,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  retryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '900',
   },
   previewText: {
     flex: 1,

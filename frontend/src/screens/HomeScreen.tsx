@@ -5,7 +5,13 @@ import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { Screen } from './Screen';
-import { deleteNote, listNotes, UploadedNote } from '../api/notes';
+import {
+  deleteNote,
+  listNotes,
+  retryNote,
+  UploadedNote,
+  waitForNoteProcessing,
+} from '../api/notes';
 import { RootTabParamList } from '../navigation/types';
 import { useAppPreferences } from '../preferences/PreferencesContext';
 import { AppTheme } from '../theme/themes';
@@ -13,11 +19,13 @@ import { AppTheme } from '../theme/themes';
 export function HomeScreen() {
   const { t } = useTranslation();
   const navigation = useNavigation<BottomTabNavigationProp<RootTabParamList, 'Home'>>();
-  const { backendUrl, theme } = useAppPreferences();
+  const { backendUrl, language, theme } = useAppPreferences();
   const styles = createStyles(theme);
   const [notes, setNotes] = useState<UploadedNote[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [retryingNoteId, setRetryingNoteId] = useState<string | null>(null);
+  const recoverableNotesCount = notes.filter((note) => isRecoverableNote(note)).length;
 
   const loadNotes = useCallback(async () => {
     setIsLoading(true);
@@ -52,6 +60,48 @@ export function HomeScreen() {
     }
   };
 
+  const retryRecoverableNote = async (note: UploadedNote) => {
+    setRetryingNoteId(note.id);
+    setMessage('');
+
+    try {
+      const queuedNote = await retryNote(backendUrl, note.id, note.language || language);
+      setNotes((currentNotes) =>
+        currentNotes.map((currentNote) =>
+          currentNote.id === queuedNote.id ? queuedNote : currentNote,
+        ),
+      );
+      navigation.navigate('Processing');
+      const retriedNote = await waitForNoteProcessing({
+        backendUrl,
+        noteId: queuedNote.id,
+      });
+      setNotes((currentNotes) =>
+        currentNotes.map((currentNote) =>
+          currentNote.id === retriedNote.id ? retriedNote : currentNote,
+        ),
+      );
+
+      if (retriedNote.status === 'completed') {
+        navigation.navigate('Result', { note: retriedNote });
+        return;
+      }
+
+      setMessage(t('retry_note_failed'));
+      navigation.navigate('Home');
+      Alert.alert(
+        retriedNote.is_stale ? t('job_stuck') : t('job_failed'),
+        retriedNote.is_stale ? t('job_stuck_hint') : t('retry_note_failed'),
+      );
+    } catch {
+      navigation.navigate('Home');
+      setMessage(t('retry_note_failed'));
+      Alert.alert(t('job_failed'), t('retry_note_failed'));
+    } finally {
+      setRetryingNoteId(null);
+    }
+  };
+
   return (
     <Screen>
       <View style={styles.hero}>
@@ -68,6 +118,14 @@ export function HomeScreen() {
               <View style={styles.liveDot} />
               <Text style={styles.statLabel}>{isLoading ? t('processing') : t('uploaded')}</Text>
             </View>
+            {recoverableNotesCount > 0 ? (
+              <View style={[styles.statPill, styles.failedStatPill]}>
+                <View style={styles.failedDot} />
+                <Text style={styles.failedStatLabel}>
+                  {recoverableNotesCount} {t('needs_retry')}
+                </Text>
+              </View>
+            ) : null}
           </View>
         </View>
         <Pressable
@@ -91,34 +149,86 @@ export function HomeScreen() {
             <Text style={styles.cardText}>{t('first_note_hint')}</Text>
           </View>
         ) : (
-          notes.map((note) => (
-            <View key={note.id} style={styles.noteCard}>
-              <Pressable onPress={() => openNote(note)} style={styles.noteMain}>
-                <View style={styles.noteTopLine}>
-                  <View style={styles.noteIcon}>
-                    <Text style={styles.noteIconText}>N</Text>
+          notes.map((note) => {
+            const hasFailed = isFailedNote(note);
+            const hasStaleJob = isStaleNote(note);
+            const isRecoverable = hasFailed || hasStaleJob;
+
+            return (
+              <View key={note.id} style={[styles.noteCard, isRecoverable && styles.failedNoteCard]}>
+                <Pressable onPress={() => openNote(note)} style={styles.noteMain}>
+                  <View style={styles.noteTopLine}>
+                    <View style={[styles.noteIcon, isRecoverable && styles.failedNoteIcon]}>
+                      <Text style={[styles.noteIconText, isRecoverable && styles.failedNoteIconText]}>
+                        {isRecoverable ? '!' : 'N'}
+                      </Text>
+                    </View>
+                    <Text style={[styles.statusPill, isRecoverable && styles.failedStatusPill]}>
+                      {hasFailed ? t('job_failed') : hasStaleJob ? t('job_stuck') : note.status}
+                    </Text>
                   </View>
-                  <Text style={styles.statusPill}>{note.status}</Text>
+                  <Text style={styles.noteTitle}>
+                    {note.summary?.split('\n')[0] || t('original_voice')}
+                  </Text>
+                  <Text style={styles.noteMeta}>
+                    {t('created')}: {new Date(note.created_at).toLocaleString()}
+                  </Text>
+                  {isRecoverable ? (
+                    <View style={styles.failedMessage}>
+                      <Text style={styles.failedMessageTitle}>
+                        {hasStaleJob ? t('job_stuck') : t('job_failed')}
+                      </Text>
+                      <Text style={styles.failedMessageText}>
+                        {hasStaleJob ? t('job_stuck_hint') : t('home_job_failed_hint')}
+                      </Text>
+                    </View>
+                  ) : null}
+                </Pressable>
+                <View style={styles.noteActions}>
+                  {isRecoverable ? (
+                    <Pressable
+                      disabled={retryingNoteId === note.id}
+                      onPress={() => retryRecoverableNote(note)}
+                      style={[
+                        styles.smallButton,
+                        styles.retryButton,
+                        retryingNoteId === note.id && styles.disabledButton,
+                      ]}
+                    >
+                      <Text style={styles.retryButtonText}>
+                        {retryingNoteId === note.id ? t('processing') : t('try_again')}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable onPress={() => openNote(note)} style={styles.smallButton}>
+                    <Text style={styles.smallButtonText}>{t('open')}</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => removeNote(note.id)}
+                    style={[styles.smallButton, styles.deleteButton]}
+                  >
+                    <Text style={styles.deleteButtonText}>{t('delete')}</Text>
+                  </Pressable>
                 </View>
-                <Text style={styles.noteTitle}>{note.summary?.split('\n')[0] || t('original_voice')}</Text>
-                <Text style={styles.noteMeta}>
-                  {t('created')}: {new Date(note.created_at).toLocaleString()}
-                </Text>
-              </Pressable>
-              <View style={styles.noteActions}>
-                <Pressable onPress={() => openNote(note)} style={styles.smallButton}>
-                  <Text style={styles.smallButtonText}>{t('open')}</Text>
-                </Pressable>
-                <Pressable onPress={() => removeNote(note.id)} style={[styles.smallButton, styles.deleteButton]}>
-                  <Text style={styles.deleteButtonText}>{t('delete')}</Text>
-                </Pressable>
               </View>
-            </View>
-          ))
+            );
+          })
         )}
       </ScrollView>
     </Screen>
   );
+}
+
+function isFailedNote(note: UploadedNote) {
+  return note.status.toLowerCase().includes('fail');
+}
+
+function isStaleNote(note: UploadedNote) {
+  return Boolean(note.is_stale);
+}
+
+function isRecoverableNote(note: UploadedNote) {
+  return isFailedNote(note) || isStaleNote(note);
 }
 
 const createStyles = (theme: AppTheme) => StyleSheet.create({
@@ -187,8 +297,22 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
   },
+  failedStatPill: {
+    backgroundColor: theme.dangerSoft,
+  },
+  failedStatLabel: {
+    color: theme.danger,
+    fontSize: 12,
+    fontWeight: '900',
+  },
   liveDot: {
     backgroundColor: theme.accent,
+    borderRadius: 999,
+    height: 8,
+    width: 8,
+  },
+  failedDot: {
+    backgroundColor: theme.danger,
     borderRadius: 999,
     height: 8,
     width: 8,
@@ -268,6 +392,9 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     shadowRadius: 18,
     elevation: 2,
   },
+  failedNoteCard: {
+    borderColor: theme.danger,
+  },
   noteMain: {
     gap: 8,
   },
@@ -289,6 +416,12 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     fontSize: 14,
     fontWeight: '900',
   },
+  failedNoteIcon: {
+    backgroundColor: theme.dangerSoft,
+  },
+  failedNoteIconText: {
+    color: theme.danger,
+  },
   statusPill: {
     backgroundColor: theme.surface,
     borderRadius: 999,
@@ -298,6 +431,10 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     overflow: 'hidden',
     paddingHorizontal: 10,
     paddingVertical: 5,
+  },
+  failedStatusPill: {
+    backgroundColor: theme.dangerSoft,
+    color: theme.danger,
   },
   noteTitle: {
     color: theme.text,
@@ -310,8 +447,27 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
+  failedMessage: {
+    backgroundColor: theme.dangerSoft,
+    borderRadius: 16,
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  failedMessageTitle: {
+    color: theme.danger,
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  failedMessageText: {
+    color: theme.text,
+    fontSize: 14,
+    lineHeight: 20,
+  },
   noteActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 10,
   },
   smallButton: {
@@ -319,12 +475,21 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     backgroundColor: theme.surface,
     borderRadius: 13,
     flex: 1,
+    minWidth: 104,
     paddingVertical: 11,
   },
   smallButtonText: {
     color: theme.text,
     fontSize: 14,
     fontWeight: '800',
+  },
+  retryButton: {
+    backgroundColor: theme.danger,
+  },
+  retryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '900',
   },
   deleteButton: {
     backgroundColor: theme.dangerSoft,

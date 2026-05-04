@@ -22,8 +22,57 @@ function Escape-SingleQuoted {
     return $Value.Replace("'", "''")
 }
 
-Assert-Directory -Path $BackendDir -Name "Backend"
-Assert-Directory -Path $FrontendDir -Name "Frontend"
+function Test-Ollama {
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 3 | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Select-LaunchMode {
+    Write-Host ""
+    Write-Host "What do you want to start?"
+    Write-Host "1. Backend"
+    Write-Host "2. Frontend"
+    Write-Host "3. Both"
+    Write-Host ""
+
+    while ($true) {
+        $Choice = Read-Host "Choose 1, 2, or 3"
+
+        switch ($Choice.Trim()) {
+            "1" { return "Backend" }
+            "2" { return "Frontend" }
+            "3" { return "Both" }
+            default { Write-Warning "Please choose 1, 2, or 3." }
+        }
+    }
+}
+
+$LaunchMode = Select-LaunchMode
+$StartBackend = $LaunchMode -eq "Backend" -or $LaunchMode -eq "Both"
+$StartFrontend = $LaunchMode -eq "Frontend" -or $LaunchMode -eq "Both"
+
+if ($StartBackend) {
+    Assert-Directory -Path $BackendDir -Name "Backend"
+}
+
+if ($StartFrontend) {
+    Assert-Directory -Path $FrontendDir -Name "Frontend"
+}
+
+if ($StartBackend -and -not (Test-Ollama)) {
+    $OllamaCommand = Get-Command ollama -ErrorAction SilentlyContinue
+    if ($OllamaCommand) {
+        Write-Host "Starting Ollama..."
+        Start-Process -FilePath $OllamaCommand.Source -ArgumentList "serve" -WindowStyle Hidden
+        Start-Sleep -Seconds 3
+    } else {
+        Write-Warning "Ollama was not found. Install Ollama or add it to PATH before generating summaries."
+    }
+}
 
 $LanAddress = Get-NetIPAddress -AddressFamily IPv4 |
     Where-Object {
@@ -97,24 +146,35 @@ Read-Host 'Frontend stopped. Press Enter to close this window'
 $BackendEncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($BackendCommand))
 $FrontendEncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($FrontendCommand))
 
-Start-Process powershell.exe -ArgumentList @(
-    "-NoExit",
-    "-ExecutionPolicy", "Bypass",
-    "-EncodedCommand", $BackendEncodedCommand
-)
+if ($StartBackend) {
+    Start-Process powershell.exe -ArgumentList @(
+        "-NoExit",
+        "-ExecutionPolicy", "Bypass",
+        "-EncodedCommand", $BackendEncodedCommand
+    )
+}
 
-Start-Sleep -Seconds 2
+if ($StartBackend -and $StartFrontend) {
+    Start-Sleep -Seconds 2
+}
 
-Start-Process powershell.exe -ArgumentList @(
-    "-NoExit",
-    "-ExecutionPolicy", "Bypass",
-    "-EncodedCommand", $FrontendEncodedCommand
-)
+if ($StartFrontend) {
+    Start-Process powershell.exe -ArgumentList @(
+        "-NoExit",
+        "-ExecutionPolicy", "Bypass",
+        "-EncodedCommand", $FrontendEncodedCommand
+    )
+}
 
 Write-Host "YourNoteAI is starting."
-Write-Host "Backend window: http://127.0.0.1:8000"
-Write-Host "Backend dashboard: http://127.0.0.1:8000/"
+Write-Host "Mode: $LaunchMode"
+if ($StartBackend) {
+    Write-Host "Backend window: http://127.0.0.1:8000"
+    Write-Host "Backend dashboard: http://127.0.0.1:8000/"
+}
 Write-Host "Phone/Expo backend URL: $BackendUrl"
-Write-Host "Frontend window: Expo Metro / QR code"
+if ($StartFrontend) {
+    Write-Host "Frontend window: Expo Metro / QR code"
+}
 Write-Host ""
-Write-Host "Close the Backend and Frontend windows when you want to stop the app."
+Write-Host "Close the opened YourNoteAI window or windows when you want to stop the app."

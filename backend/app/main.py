@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from .cleanup import run_cleanup_loop
 from .database import init_db
-from .dashboard import dashboard_html, router as dashboard_router
+from .dashboard import dashboard_html, job_progress_html, router as dashboard_router
 from .notes import router as notes_router
 from .presence import get_online_count, router as presence_router
 from .storage import ensure_storage_directories
@@ -49,6 +49,11 @@ app.include_router(dashboard_router)
 @app.get("/", response_class=HTMLResponse)
 def backend_dashboard() -> HTMLResponse:
     return dashboard_html()
+
+
+@app.get("/jobs", response_class=HTMLResponse)
+def backend_job_progress() -> HTMLResponse:
+    return job_progress_html()
 
 
 @app.get("/api/health")

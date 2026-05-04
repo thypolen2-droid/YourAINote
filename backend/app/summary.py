@@ -9,9 +9,28 @@ class SummaryError(RuntimeError):
     """Raised when Ollama cannot generate a summary."""
 
 
-def build_summary_prompt(transcript: str) -> str:
+LANGUAGE_INSTRUCTIONS = {
+    "en": "Respond in English.",
+    "km": "Respond in Khmer.",
+}
+
+
+NO_SPEECH_MESSAGES = {
+    "en": "No clear speech was detected, so there is no transcript to summarize.",
+    "km": "រកមិនឃើញសំឡេងនិយាយច្បាស់ទេ ដូច្នេះមិនមានអត្ថបទសម្រាប់សង្ខេបទេ។",
+}
+
+
+def normalize_summary_language(language: str) -> str:
+    return language if language in LANGUAGE_INSTRUCTIONS else "en"
+
+
+def build_summary_prompt(transcript: str, language: str) -> str:
+    normalized_language = normalize_summary_language(language)
+
     return f"""Summarize this voice note clearly.
 Keep it short, useful, and easy to understand.
+{LANGUAGE_INSTRUCTIONS[normalized_language]}
 Return:
 1. Short Summary
 2. Key Points
@@ -22,13 +41,15 @@ Text:
 """
 
 
-def generate_summary(transcript: str) -> str:
+def generate_summary(transcript: str, language: str = "en") -> str:
+    normalized_language = normalize_summary_language(language)
+
     if not transcript.strip():
-        return "No clear speech was detected, so there is no transcript to summarize."
+        return NO_SPEECH_MESSAGES[normalized_language]
 
     payload = {
         "model": OLLAMA_MODEL,
-        "prompt": build_summary_prompt(transcript),
+        "prompt": build_summary_prompt(transcript, normalized_language),
         "stream": False,
     }
 

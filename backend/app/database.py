@@ -28,10 +28,29 @@ def init_db() -> None:
                 summary_path TEXT,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT 'en',
                 status TEXT NOT NULL
             )
             """
         )
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(notes)").fetchall()
+        }
+        if "language" not in columns:
+            connection.execute(
+                "ALTER TABLE notes ADD COLUMN language TEXT NOT NULL DEFAULT 'en'"
+            )
+        if "updated_at" not in columns:
+            connection.execute("ALTER TABLE notes ADD COLUMN updated_at TEXT")
+            connection.execute(
+                "UPDATE notes SET updated_at = created_at WHERE updated_at IS NULL"
+            )
+
+
+def utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def create_note(
@@ -40,6 +59,7 @@ def create_note(
     audio_path: str,
     created_at: str,
     expires_at: str,
+    language: str,
     status: str,
 ) -> None:
     with get_connection() as connection:
@@ -52,11 +72,13 @@ def create_note(
                 summary_path,
                 created_at,
                 expires_at,
+                updated_at,
+                language,
                 status
             )
-            VALUES (?, ?, NULL, NULL, ?, ?, ?)
+            VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?)
             """,
-            (note_id, audio_path, created_at, expires_at, status),
+            (note_id, audio_path, created_at, expires_at, created_at, language, status),
         )
 
 
@@ -71,6 +93,8 @@ def get_note(note_id: str) -> sqlite3.Row | None:
                 summary_path,
                 created_at,
                 expires_at,
+                updated_at,
+                language,
                 status
             FROM notes
             WHERE id = ?
@@ -92,6 +116,8 @@ def list_active_notes() -> list[sqlite3.Row]:
                 summary_path,
                 created_at,
                 expires_at,
+                updated_at,
+                language,
                 status
             FROM notes
             WHERE expires_at > ?
@@ -114,6 +140,8 @@ def list_expired_notes() -> list[sqlite3.Row]:
                 summary_path,
                 created_at,
                 expires_at,
+                updated_at,
+                language,
                 status
             FROM notes
             WHERE expires_at <= ?
@@ -131,8 +159,16 @@ def delete_note_row(note_id: str) -> None:
 def update_note_status(note_id: str, status: str) -> None:
     with get_connection() as connection:
         connection.execute(
-            "UPDATE notes SET status = ? WHERE id = ?",
-            (status, note_id),
+            "UPDATE notes SET status = ?, updated_at = ? WHERE id = ?",
+            (status, utc_now_iso(), note_id),
+        )
+
+
+def update_note_language(note_id: str, language: str) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE notes SET language = ?, updated_at = ? WHERE id = ?",
+            (language, utc_now_iso(), note_id),
         )
 
 
@@ -141,10 +177,10 @@ def update_note_transcript(note_id: str, transcript_path: str, status: str) -> N
         connection.execute(
             """
             UPDATE notes
-            SET transcript_path = ?, status = ?
+            SET transcript_path = ?, status = ?, updated_at = ?
             WHERE id = ?
             """,
-            (transcript_path, status, note_id),
+            (transcript_path, status, utc_now_iso(), note_id),
         )
 
 
@@ -153,8 +189,8 @@ def update_note_summary(note_id: str, summary_path: str, status: str) -> None:
         connection.execute(
             """
             UPDATE notes
-            SET summary_path = ?, status = ?
+            SET summary_path = ?, status = ?, updated_at = ?
             WHERE id = ?
             """,
-            (summary_path, status, note_id),
+            (summary_path, status, utc_now_iso(), note_id),
         )

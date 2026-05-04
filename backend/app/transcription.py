@@ -4,6 +4,7 @@ from pathlib import Path
 from .config import (
     MAX_AUDIO_DURATION_SECONDS,
     TRANSCRIPTS_DIR,
+    WHISPER_BEAM_SIZE,
     WHISPER_COMPUTE_TYPE,
     WHISPER_DEVICE,
     WHISPER_MODEL_SIZE,
@@ -35,7 +36,7 @@ def transcribe_audio(audio_path: Path, language: str) -> str:
     whisper_language = LANGUAGE_MAP.get(language)
     segments, info = model.transcribe(
         str(audio_path),
-        beam_size=5,
+        beam_size=WHISPER_BEAM_SIZE,
         language=whisper_language,
         vad_filter=True,
     )
